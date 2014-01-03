@@ -34,8 +34,6 @@
 #include <asm/atomic.h>
 #include <linux/gpio.h>
 
-#include <linux/hotplug.h>
-
 #include <linux/input/lge_touch_core.h>
 
 #ifdef CUST_G_TOUCH
@@ -107,13 +105,6 @@ param_check_int(touch_orientation, &(touch_orientation)); 			   \
 LGE__module_param_call(MODULE_PARAM_PREFIX, touch_orientation, &param_ops_int, &touch_orientation, 0666, 0); \
 __MODULE_PARM_TYPE(touch_orientation, int);
 #endif
-
-/* extern vars */
-bool is_touching;
-u64 freq_boosted_time;
-unsigned long time_stamp;
-
-void touchboost_func(void);
 
 /* Debug mask value
  * usage: echo [debug_mask] > /sys/module/lge_touch_core/parameters/debug_mask
@@ -1783,15 +1774,6 @@ static void touch_work_func_a(struct work_struct *work)
 		}
 	}
 #endif
-
-	if (!is_touching)
-	{
-		gpu_idle = false;
-		touchboost_func();
-	}
-
-    is_touching = true;
-	freq_boosted_time = time_stamp = ktime_to_ms(ktime_get());
 
 	ret = touch_work_pre_proc(ts);
 
