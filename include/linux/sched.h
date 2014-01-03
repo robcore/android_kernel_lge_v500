@@ -1073,6 +1073,8 @@ bool cpus_share_cache(int this_cpu, int that_cpu);
 
 #else /* CONFIG_SMP */
 
+extern struct atomic_notifier_head migration_notifier_head;
+
 struct sched_domain_attr;
 
 static inline void
