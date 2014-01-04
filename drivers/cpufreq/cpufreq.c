@@ -34,9 +34,9 @@
 
 #include <trace/events/power.h>
 
-#ifdef CONFIG_LGE_PM_LOW_BATT_CHG
+/*#ifdef CONFIG_LGE_PM_LOW_BATT_CHG
 #include <mach/board_lge.h>
-#endif
+#endif*/
 
 /**
  * The "cpufreq driver" - the arch- or hardware-dependent low
@@ -984,9 +984,9 @@ err_out_kobj_put:
  * with with cpu hotplugging and all hell will break loose. Tried to clean this
  * mess up, but more thorough testing is needed. - Mathieu
  */
-#ifdef CONFIG_LGE_PM_LOW_BATT_CHG
+/*#ifdef CONFIG_LGE_PM_LOW_BATT_CHG
 extern struct cpufreq_governor cpufreq_gov_powersave;
-#endif
+#endif*/
 static int cpufreq_add_dev(struct device *dev, struct subsys_interface *sif)
 {
 	unsigned int cpu = dev->id;
@@ -1055,12 +1055,12 @@ static int cpufreq_add_dev(struct device *dev, struct subsys_interface *sif)
 	if (!found)
 		policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
 
-#ifdef CONFIG_LGE_PM_LOW_BATT_CHG
+/*#ifdef CONFIG_LGE_PM_LOW_BATT_CHG
 	if (!found && lge_get_charger_logo_state()) {
 		policy->governor = &cpufreq_gov_powersave;
 		pr_info("During chargerlogo, cpu %d governor=gov_powersave\n", cpu);
 	}
-#endif
+#endif*/
 
 	/* call driver. From then on the cpufreq must be able
 	 * to accept all calls to ->verify and ->setpolicy for this CPU
