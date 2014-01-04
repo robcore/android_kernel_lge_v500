@@ -113,7 +113,7 @@ static unsigned int timer_rate;
  * The CPU will be boosted to this frequency when the screen is
  * touched. input_boost needs to be enabled.
  */
-#define DEFAULT_INPUT_BOOST_FREQ 1134000
+#define DEFAULT_INPUT_BOOST_FREQ 1350000
 static int input_boost_freq;
 
 /*
