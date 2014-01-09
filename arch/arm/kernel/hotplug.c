@@ -215,9 +215,9 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 
 #ifdef DEBUG
 	short load_array[4] = {};
-    int cpu_debug = 0;
+	int cpu_debug = 0;
 	static unsigned long debug_time_stamp;
-    struct cpufreq_policy policy;
+	struct cpufreq_policy policy;
 #endif
 
 	now = ktime_to_ms(ktime_get());
@@ -232,7 +232,7 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 #endif		
 		
 		if (load < lowest_cpu_load && cpu && !(core_boost[cpu] && 
-				now - time_stamp < BOOST_THRESHOLD))
+			now - time_stamp < BOOST_THRESHOLD))
 		{
 			lowest_cpu = cpu;
 			lowest_cpu_load = load;
@@ -286,8 +286,8 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 	}
 	
 #ifdef DEBUG
-    if (debug_time_stamp < ktime_to_ms(ktime_get()) - 80)
-    {
+	if (debug_time_stamp < ktime_to_ms(ktime_get()) - 80)
+	{
 		cpu = 0;
 		pr_info("----HOTPLUG DEBUG INFO----\n");
 		pr_info("Cores on:\t%d", online_cpus);
@@ -326,20 +326,19 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 	}
 #endif
 
-    queue_delayed_work(wq, &decide_hotplug, msecs_to_jiffies(50));
+	queue_delayed_work(wq, &decide_hotplug, msecs_to_jiffies(50));
 }
 
 static void suspend_func(struct work_struct *work)
 {
 	int cpu;
 
-    /* cancel the hotplug work when the screen is off and flush the WQ */
+	/* cancel the hotplug work when the screen is off and flush the WQ */
 	flush_workqueue(wq);
-    cancel_delayed_work_sync(&decide_hotplug);
-	cancel_work_sync(&resume);
+	cancel_delayed_work_sync(&decide_hotplug);
 
-    pr_info("Early Suspend stopping Hotplug work...\n");
-    
+	pr_info("Early Suspend stopping Hotplug work...\n");
+	
 	for_each_possible_cpu(cpu) 
 	{
 		if (cpu)
@@ -361,39 +360,37 @@ static void suspend_func(struct work_struct *work)
 
 static void __ref resume_func(struct work_struct *work)
 {
-	cancel_work_sync(&suspend);
-
 	/* restore max frequency */
-    msm_cpufreq_set_freq_limits(0, MSM_CPUFREQ_NO_LIMIT, MSM_CPUFREQ_NO_LIMIT);
-    pr_info("Cpulimit: Late resume - restore cpu%d max frequency.\n", 0);
+	msm_cpufreq_set_freq_limits(0, MSM_CPUFREQ_NO_LIMIT, MSM_CPUFREQ_NO_LIMIT);
+	pr_info("Cpulimit: Late resume - restore cpu%d max frequency.\n", 0);
 
 	/* touchboost */
 	is_touching = true;
-    idle_counter = -10;
-    gpu_idle = false;
+	idle_counter = -10;
+	gpu_idle = false;
 
 	freq_boosted_time = time_stamp = ktime_to_ms(ktime_get());
 	is_touching = true;
 	
 	touchboost_func();
-    
-    pr_info("Late Resume starting Hotplug work...\n");
-    queue_delayed_work(wq, &decide_hotplug, HZ);	
+	
+	pr_info("Late Resume starting Hotplug work...\n");
+	queue_delayed_work(wq, &decide_hotplug, HZ);	
 }
 
 static void hotplug_early_suspend(struct early_suspend *handler)
 {	 
-    queue_work(pm_wq, &suspend);
+	queue_work_on(0, pm_wq, &suspend);
 }
 
 static void hotplug_late_resume(struct early_suspend *handler)
 {  
-	queue_work(pm_wq, &resume);
+	queue_work_on(0, pm_wq, &resume);
 }
 
 static struct early_suspend hotplug_suspend =
 {
-    .level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1,
+	.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1,
 	.suspend = hotplug_early_suspend,
 	.resume = hotplug_late_resume,
 };
@@ -407,24 +404,24 @@ int __init hotplug_init(void)
 {
 	pr_info("Hotplug driver started.\n");
 
-    wq = alloc_ordered_workqueue("hotplug_workqueue", 0);
-    
-    if (!wq)
-        return -ENOMEM;
+	wq = alloc_ordered_workqueue("hotplug_workqueue", 0);
+	
+	if (!wq)
+		return -ENOMEM;
 
 	pm_wq = alloc_workqueue("pm_workqueue", 0, 1);
-    
-    if (!pm_wq)
-        return -ENOMEM;
+	
+	if (!pm_wq)
+		return -ENOMEM;
 
-    INIT_DELAYED_WORK(&decide_hotplug, decide_hotplug_func);
+	INIT_DELAYED_WORK(&decide_hotplug, decide_hotplug_func);
 	INIT_WORK(&resume, resume_func);
 	INIT_WORK(&suspend, suspend_func);
-    queue_delayed_work(wq, &decide_hotplug, HZ*25);
-    
-    register_early_suspend(&hotplug_suspend);
-    
-    return 0;
+	queue_delayed_work(wq, &decide_hotplug, HZ*25);
+	
+	register_early_suspend(&hotplug_suspend);
+	
+	return 0;
 }
 late_initcall(hotplug_init);
 
