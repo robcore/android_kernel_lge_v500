@@ -21,7 +21,7 @@
 #include <linux/workqueue.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
-#include <linux/earlysuspend.h>
+#include <linux/powersuspend.h>
 #include <linux/cpufreq.h>
 #include <linux/delay.h>
 #include <linux/hotplug.h>
@@ -378,21 +378,20 @@ static void __ref resume_func(struct work_struct *work)
 	queue_delayed_work(wq, &decide_hotplug, HZ);	
 }
 
-static void hotplug_early_suspend(struct early_suspend *handler)
+static void hotplug_power_suspend(struct power_suspend *handler)
 {	 
 	queue_work_on(0, pm_wq, &suspend);
 }
 
-static void hotplug_late_resume(struct early_suspend *handler)
+static void hotplug_power_resume(struct power_suspend *handler)
 {  
 	queue_work_on(0, pm_wq, &resume);
 }
 
-static struct early_suspend hotplug_suspend =
+static struct power_suspend hotplug_suspend =
 {
-	.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1,
-	.suspend = hotplug_early_suspend,
-	.resume = hotplug_late_resume,
+	.suspend = hotplug_power_suspend,
+	.resume = hotplug_power_resume,
 };
 
 bool get_core_boost(unsigned int cpu)
@@ -419,7 +418,7 @@ int __init hotplug_init(void)
 	INIT_WORK(&suspend, suspend_func);
 	queue_delayed_work(wq, &decide_hotplug, HZ*25);
 	
-	register_early_suspend(&hotplug_suspend);
+	register_power_suspend(&hotplug_suspend);
 	
 	return 0;
 }
