@@ -536,6 +536,7 @@ static u32 ddl_set_dec_property(struct ddl_client_context *ddl,
 	}
 	break;
 	case VCD_REQ_PERF_LEVEL:
+		DDL_MSG_LOW("%s: VCD_REQ_PERF_LEVEL (do nithing)", __func__);
 		vcd_status = VCD_S_SUCCESS;
 		break;
 	default:
@@ -1180,6 +1181,7 @@ static u32 ddl_set_enc_property(struct ddl_client_context *ddl,
 		}
 	break;
 	case VCD_REQ_PERF_LEVEL:
+		DDL_MSG_LOW("%s: VCD_REQ_PERF_LEVEL (do nithing)", __func__);
 		vcd_status = VCD_S_SUCCESS;
 		break;
 	case VCD_I_ENABLE_DELIMITER_FLAG:
@@ -2259,6 +2261,17 @@ u32 ddl_set_default_decoder_buffer_req(struct ddl_decoder_data *decoder,
 		output_buf_req = &decoder->actual_output_buf_req;
 		input_buf_req = &decoder->actual_input_buf_req;
 		min_dpb = decoder->min_dpb_num;
+		if (decoder->cont_mode &&
+			decoder->codec.codec == VCD_CODEC_H264) {
+			min_dpb = res_trk_get_min_dpb_count();
+			min_dpb_from_res_trk = 1;
+			if (min_dpb < decoder->min_dpb_num) {
+				DDL_MSG_HIGH("Warning: cont_mode dpb count"\
+					"(%u) is less than decoder min dpb count(%u)",
+					min_dpb, decoder->min_dpb_num);
+				min_dpb = decoder->min_dpb_num;
+			}
+		}
 		if ((decoder->buf_format.buffer_format ==
 			VCD_BUFFER_FORMAT_TILE_4x2) &&
 			(frame_size->height < MDP_MIN_TILE_HEIGHT)) {

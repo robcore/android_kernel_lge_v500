@@ -25,6 +25,7 @@
 #include <linux/fb.h>
 #include <linux/msm_mdp.h>
 #include <linux/init.h>
+#include <linux/kthread.h>
 #include <linux/ioport.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
@@ -165,7 +166,7 @@ static int mdp_bl_scale_config(struct msm_fb_data_type *mfd,
 #else /* QCT Original */
 static void msm_fb_scale_bl(__u32 *bl_lvl);
 #endif
-static void msm_fb_commit_wq_handler(struct work_struct *work);
+static int msm_fb_commit_thread(void *data);
 static int msm_fb_pan_idle(struct msm_fb_data_type *mfd);
 
 #ifdef CONFIG_LGE_DISP_FBREAD
@@ -178,7 +179,7 @@ static ssize_t msm_fb_read(struct fb_info *info, char __user *buf,
 #define MSM_FB_MAX_DBGFS 1024
 #define MAX_BACKLIGHT_BRIGHTNESS 255
 
-#define WAIT_FENCE_FIRST_TIMEOUT MSEC_PER_SEC
+#define WAIT_FENCE_FIRST_TIMEOUT 3 * MSEC_PER_SEC
 #define WAIT_FENCE_FINAL_TIMEOUT 10 * MSEC_PER_SEC
 /* Display op timeout should be greater than total timeout */
 #define WAIT_DISP_OP_TIMEOUT (WAIT_FENCE_FIRST_TIMEOUT +\
@@ -584,6 +585,7 @@ static int msm_fb_remove(struct platform_device *pdev)
 		del_timer(&mfd->msmfb_no_update_notify_timer);
 	complete(&mfd->msmfb_no_update_notify);
 	complete(&mfd->msmfb_update_notify);
+	kthread_stop(mfd->commit_thread);
 
 	/* remove /dev/fb* */
 	unregister_framebuffer(mfd->fbi);
@@ -1067,9 +1069,6 @@ static int msm_fb_blank_sub(int blank_mode, struct fb_info *info,
 	int retry_cnt = 0;
 #endif
 
-	if (!op_enable)
-		return -EPERM;
-
 	pdata = (struct msm_fb_panel_data *)mfd->pdev->dev.platform_data;
 	if ((!pdata) || (!pdata->on) || (!pdata->off)) {
 		printk(KERN_ERR "msm_fb_blank_sub: no panel operation detected!\n");
@@ -1257,10 +1256,11 @@ static int msm_fb_blank(int blank_mode, struct fb_info *info)
 		if (blank_mode == FB_BLANK_UNBLANK) {
 			mfd->suspend.panel_power_on = TRUE;
 			/* if unblank is called when system is in suspend,
-			do not unblank but send SUCCESS to hwc, so that hwc
-			keeps pushing frames and display comes up as soon
-			 as system is resumed */
-			return 0;
+			wait for the system to resume */
+			while (mfd->suspend.op_suspend) {
+				pr_debug("waiting for system to resume\n");
+				msleep(20);
+			}
 		}
 		else
 			mfd->suspend.panel_power_on = FALSE;
@@ -1662,7 +1662,10 @@ static int msm_fb_register(struct msm_fb_data_type *mfd)
 	init_completion(&mfd->msmfb_no_update_notify);
 	init_completion(&mfd->commit_comp);
 	mutex_init(&mfd->sync_mutex);
-	INIT_WORK(&mfd->commit_work, msm_fb_commit_wq_handler);
+	mutex_init(&mfd->queue_mutex);
+	init_waitqueue_head(&mfd->commit_queue);
+	mfd->commit_thread = kthread_run(msm_fb_commit_thread, mfd,
+			"msmfb_commit_thread");
 	mfd->msm_fb_backup = kzalloc(sizeof(struct msm_fb_backup_type),
 		GFP_KERNEL);
 	if (mfd->msm_fb_backup == 0) {
@@ -1996,6 +1999,11 @@ static int msm_fb_open(struct fb_info *info, int user)
 	return 0;
 }
 
+static void msm_fb_free_base_pipe(struct msm_fb_data_type *mfd)
+{
+	return 	mdp4_overlay_free_base_pipe(mfd);
+}
+
 static int msm_fb_release(struct fb_info *info, int user)
 {
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
@@ -2009,12 +2017,16 @@ static int msm_fb_release(struct fb_info *info, int user)
 	msm_fb_pan_idle(mfd);
 	mfd->ref_cnt--;
 
-	if ((!mfd->ref_cnt) && (mfd->op_enable)) {
-		if ((ret =
-		     msm_fb_blank_sub(FB_BLANK_POWERDOWN, info,
-				      mfd->op_enable)) != 0) {
-			printk(KERN_ERR "msm_fb_release: can't turn off display!\n");
-			return ret;
+	if (!mfd->ref_cnt) {
+		if (mfd->op_enable) {
+			ret = msm_fb_blank_sub(FB_BLANK_POWERDOWN, info,
+							mfd->op_enable);
+			if (ret != 0) {
+				printk(KERN_ERR "msm_fb_release: can't turn off display!\n");
+				return ret;
+			}
+		} else {
+			msm_fb_free_base_pipe(mfd);
 		}
 	}
 
@@ -2059,17 +2071,24 @@ int msm_fb_signal_timeline(struct msm_fb_data_type *mfd)
 		sw_sync_timeline_inc(mfd->timeline, 1);
 		mfd->timeline_value++;
 	}
+	if (atomic_read(&mfd->commit_cnt) > 0)
+		atomic_dec(&mfd->commit_cnt);
 	mutex_unlock(&mfd->sync_mutex);
 	return 0;
 }
 
 void msm_fb_release_timeline(struct msm_fb_data_type *mfd)
 {
+	u32 commit_cnt;
 	mutex_lock(&mfd->sync_mutex);
+	commit_cnt = atomic_read(&mfd->commit_cnt) + 3;
+	if (commit_cnt < 0)
+		commit_cnt = 0;
 	if (mfd->timeline) {
-		sw_sync_timeline_inc(mfd->timeline, 2);
-		mfd->timeline_value += 2;
+		sw_sync_timeline_inc(mfd->timeline, 2 + commit_cnt);
+		mfd->timeline_value += 2 + commit_cnt;
 	}
+	atomic_set(&mfd->commit_cnt, 0);
 	mutex_unlock(&mfd->sync_mutex);
 }
 
@@ -2148,6 +2167,8 @@ static int msm_fb_pan_display_ex(struct fb_info *info,
 			info->var.yoffset =
 				(var->yoffset / info->fix.ypanstep) *
 					info->fix.ypanstep;
+	} else {
+		mdp4_overlay_mdp_perf_upd(mfd, 1);
 	}
 	fb_backup = (struct msm_fb_backup_type *)mfd->msm_fb_backup;
 	memcpy(&fb_backup->info, info, sizeof(struct fb_info));
@@ -2155,7 +2176,9 @@ static int msm_fb_pan_display_ex(struct fb_info *info,
 		sizeof(struct mdp_display_commit));
 	mfd->is_committing = 1;
 	INIT_COMPLETION(mfd->commit_comp);
-	schedule_work(&mfd->commit_work);
+	atomic_inc(&mfd->commit_cnt);
+	mfd->wake_commit_thread = 1;
+	wake_up_interruptible_all(&mfd->commit_queue);
 	mutex_unlock(&mfd->sync_mutex);
 	if (wait_for_finish)
 		msm_fb_pan_idle(mfd);
@@ -2318,28 +2341,52 @@ static int msm_fb_pan_display_sub(struct fb_var_screeninfo *var,
 	return 0;
 }
 
-static void msm_fb_commit_wq_handler(struct work_struct *work)
+void msm_fb_release_busy(struct msm_fb_data_type *mfd)
 {
-	struct msm_fb_data_type *mfd;
-	struct fb_var_screeninfo *var;
-	struct fb_info *info;
-	struct msm_fb_backup_type *fb_backup;
-
-	mfd = container_of(work, struct msm_fb_data_type, commit_work);
-	fb_backup = (struct msm_fb_backup_type *)mfd->msm_fb_backup;
-	info = &fb_backup->info;
-	if (fb_backup->disp_commit.flags &
-		MDP_DISPLAY_COMMIT_OVERLAY) {
-			mdp4_overlay_commit(info);
-	} else {
-		var = &fb_backup->disp_commit.var;
-		msm_fb_pan_display_sub(var, info);
-	}
 	mutex_lock(&mfd->sync_mutex);
 	mfd->is_committing = 0;
 	complete_all(&mfd->commit_comp);
 	mutex_unlock(&mfd->sync_mutex);
+}
+static int msm_fb_commit_thread(void *data)
+{
+	int ret = 0;
+	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *) data;
+	struct fb_var_screeninfo *var;
+	struct fb_info *info;
+	struct msm_fb_backup_type *fb_backup;
+	u32 overlay_commit = false;
 
+	while (!kthread_should_stop()) {
+		ret = wait_event_interruptible(mfd->commit_queue,
+				mfd->wake_commit_thread);
+		if (ret >= 0) {
+			mfd->wake_commit_thread = 0;
+			mutex_lock(&mfd->queue_mutex);
+			while (atomic_read(&mfd->commit_cnt) > 0) {
+				fb_backup = (struct msm_fb_backup_type *)
+					mfd->msm_fb_backup;
+				info = &fb_backup->info;
+				if (fb_backup->disp_commit.flags &
+						MDP_DISPLAY_COMMIT_OVERLAY) {
+					overlay_commit = true;
+					mdp4_overlay_commit(info);
+				} else {
+					var = &fb_backup->disp_commit.var;
+					msm_fb_pan_display_sub(var, info);
+					msm_fb_release_busy(mfd);
+				}
+				if (unset_bl_level && !bl_updated)
+					schedule_delayed_work(
+							&mfd->backlight_worker,
+							backlight_duration);
+			}
+			if (overlay_commit)
+				mdp4_overlay_commit_finish(info);
+			mutex_unlock(&mfd->queue_mutex);
+		}
+	}
+	return 0;
 }
 
 static int msm_fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
@@ -3947,7 +3994,8 @@ static int msmfb_handle_buf_sync_ioctl(struct msm_fb_data_type *mfd,
 	if (buf_sync->flags & MDP_BUF_SYNC_FLAG_WAIT) {
 		msm_fb_wait_for_fence(mfd);
 	}
-	if (mfd->panel.type == WRITEBACK_PANEL)
+	if ((mfd->panel.type == WRITEBACK_PANEL) ||
+		(mfd->panel.type == MIPI_CMD_PANEL))
 		threshold = 1;
 	else
 		threshold = 2;
@@ -3967,12 +4015,14 @@ static int msmfb_handle_buf_sync_ioctl(struct msm_fb_data_type *mfd,
 	}
 
 	release_sync_pt = sw_sync_pt_create(mfd->timeline,
-			mfd->timeline_value + threshold);
+			mfd->timeline_value + threshold +
+			atomic_read(&mfd->commit_cnt));
 	release_fence = sync_fence_create("mdp-fence",
 			release_sync_pt);
 	sync_fence_install(release_fence, release_fen_fd);
 	retire_sync_pt = sw_sync_pt_create(mfd->timeline,
-			mfd->timeline_value + threshold);
+			mfd->timeline_value + threshold +
+			atomic_read(&mfd->commit_cnt) + 1);
 	retire_fence = sync_fence_create("mdp-retire-fence",
 			retire_sync_pt);
 	sync_fence_install(retire_fence, retire_fen_fd);

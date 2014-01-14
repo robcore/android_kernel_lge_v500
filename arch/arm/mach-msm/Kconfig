@@ -172,6 +172,10 @@ config ARCH_MSM8960
 	select MSM_KRAIT_WFE_FIXUP
 	select MSM_IOMMU_GPU_SYNC
 	select MSM_CPU_PWRCTL
+	select GENERIC_TIME_VSYSCALL
+	select USE_USER_ACCESSIBLE_TIMERS
+	select ARM_USE_USER_ACCESSIBLE_TIMERS
+	select MSM_USE_USER_ACCESSIBLE_TIMERS
 
 config ARCH_MSM8930
 	bool "MSM8930"
@@ -206,6 +210,10 @@ config ARCH_MSM8930
 	select MSM_KRAIT_WFE_FIXUP
 	select MSM_IOMMU_GPU_SYNC
 	select MSM_CPU_PWRCTL
+	select GENERIC_TIME_VSYSCALL
+	select USE_USER_ACCESSIBLE_TIMERS
+	select ARM_USE_USER_ACCESSIBLE_TIMERS
+	select MSM_USE_USER_ACCESSIBLE_TIMERS
 
 config ARCH_APQ8064
 	bool "APQ8064"
@@ -235,6 +243,10 @@ config ARCH_APQ8064
 	select MSM_KRAIT_WFE_FIXUP
 	select MSM_IOMMU_GPU_SYNC
 	select MSM_CPU_PWRCTL
+	select GENERIC_TIME_VSYSCALL
+	select USE_USER_ACCESSIBLE_TIMERS
+	select ARM_USE_USER_ACCESSIBLE_TIMERS
+	select MSM_USE_USER_ACCESSIBLE_TIMERS
 
 config ARCH_MSM8974
 	bool "MSM8974"
@@ -260,6 +272,7 @@ config ARCH_MSM8974
 	select MSM_RPM_REGULATOR_SMD
 	select ARM_HAS_SG_CHAIN
 	select MSM_RUN_QUEUE_STATS
+	select DONT_MAP_HOLE_AFTER_MEMBANK0
 
 config ARCH_MPQ8092
 	bool "MPQ8092"
@@ -2492,6 +2505,21 @@ config MSM_L1_ERR_PANIC
 
 	  For production builds, you should probably say 'N' here.
 
+config MSM_L1_RECOV_ERR_PANIC
+	bool "Panic on recoverable L1 cache errors"
+	depends on MSM_CACHE_ERP && MSM_L1_ERR_PANIC
+	help
+	  Certain CPU designs may be able to automatically recover from certain
+	  kinds of L1 cache errors, even though the L1 cache itself may not
+	  support error correction. These errors should not result in any kind
+	  of corruption, but their presence is nevertheless an indication of
+	  poor system health. To cause the kernel to panic whenever a
+	  recoverable L1 cache error is detected, say 'Y' here. This may be
+	  useful as a debugging technique if general system instability is
+	  suspected.
+
+	  For production builds, you should definitely say 'N' here.
+
 config MSM_L1_ERR_LOG
 	bool "Log CPU ERP events to system memory"
 	depends on MSM_CACHE_ERP
@@ -2622,6 +2650,13 @@ config LGE_UART_ENABLE_GJ
 		Becuase of hardware structure related to IrDA in GJ model,
 		It's available to use one of IrDA pin or Uart Debug Pin.
 		When UART_ENABLE_GJ feature is checked, if Uart Debugging is switched on, IrDA is switched Off
+
+config MSM_USE_USER_ACCESSIBLE_TIMERS
+	bool "Enables mapping an MSM timer counter page to user space."
+	depends on ARM_USE_USER_ACCESSIBLE_TIMERS
+	help
+	  Enables MSM-specific user accessible timers via a shared
+	  memory page containing the cycle counter.
 
 endif
 config LGE_IRRC
