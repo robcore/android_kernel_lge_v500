@@ -56,7 +56,7 @@ struct cpufreq_interactive_cpuinfo {
 
 static DEFINE_PER_CPU(struct cpufreq_interactive_cpuinfo, cpuinfo);
 
-struct atomic_notifier_head migration_notifier_head;
+struct atomic_notifier_head interactive_migration_notifier_head;
 
 /* Workqueues handle frequency scaling */
 static struct task_struct *up_task;
@@ -787,7 +787,7 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
             if (rc)
                 return rc;
                 
-            atomic_notifier_chain_register(&migration_notifier_head,
+            atomic_notifier_chain_register(&interactive_migration_notifier_head,
                                         &thread_migration_nb);
             
             break;
@@ -816,7 +816,7 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
                                &interactive_attr_group);
                                
             atomic_notifier_chain_unregister(
-                                &migration_notifier_head,
+                                &interactive_migration_notifier_head,
                                 &thread_migration_nb);
             
             break;
