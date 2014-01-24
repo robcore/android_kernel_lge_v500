@@ -49,6 +49,7 @@ struct cpufreq_interactive_cpuinfo {
 	struct cpufreq_frequency_table *freq_table;
 	unsigned int target_freq;
 	unsigned int floor_freq;
+	u64 hispeed_validate_time;
 	u64 floor_validate_time;
 	int governor_enabled;
 	unsigned int prev_iowait_time;
@@ -93,6 +94,10 @@ static unsigned int interactive_val[GPU_STATE][ACTIVE_CORES][TUNABLES] =
 	{95, 20000, 80000} 
 }};
 
+/* Hi speed freq wall if gpu is idle */
+#define DEFAULT_HISPEED_FREQ 1134000
+static int hispeed_freq;
+
 /* If the CPU load is >= 85% it goes to max frequency */
 #define DEFAULT_UP_THRESHOLD 85
 static unsigned int up_threshold;
@@ -108,6 +113,12 @@ static unsigned int min_sample_time;
  */
 #define DEFAULT_TIMER_RATE (35 * USEC_PER_MSEC)
 static unsigned int timer_rate;
+
+/*
+ * Wait this long before raising speed above hispeed if gpu is idle
+ */
+#define DEFAULT_ABOVE_HISPEED_DELAY (200 * USEC_PER_MSEC)
+static unsigned long above_hispeed_delay_val;
 
 /*
  * The CPU will be boosted to this frequency when the screen is
@@ -222,7 +233,7 @@ static void cpufreq_interactive_timer(unsigned long data)
 	if (WARN_ON_ONCE(!delta_time))
 		goto rearm;
     
-    cpu_load = delta_idle > delta_time ? 
+	cpu_load = delta_idle > delta_time ? 
                          0 : 100 * (delta_time - delta_idle) / delta_time;
     
 	delta_idle = (unsigned int)(now_idle - pcpu->target_set_time_in_idle);
@@ -255,6 +266,22 @@ static void cpufreq_interactive_timer(unsigned long data)
 		new_freq = max_freq;
 	else
 		new_freq = max_freq * cpu_load / up_threshold;
+
+	/* we don't want early high frequencies if the gpu is idle */
+        if (gpu_idle)
+	{
+		/* reset timer if normal freq is below/equal highspeed freq */
+		if (new_freq <= hispeed_freq)
+                	pcpu->hispeed_validate_time = pcpu->timer_run_time;
+
+		/* reduce freq when we are earlier than above_hispeed_delay */
+		else if (pcpu->timer_run_time - pcpu->hispeed_validate_time
+				< above_hispeed_delay_val)
+			new_freq = hispeed_freq;
+	}
+	/* reset the timer when the gpu is active */
+	else
+		pcpu->hispeed_validate_time = pcpu->timer_run_time;
 	
 	/* check touchboost state and cpu core*/
 	if (is_touching && get_core_boost(pcpu->policy->cpu))
@@ -581,6 +608,51 @@ static struct notifier_block thread_migration_nb = {
         .notifier_call = thread_migration_notify,
 };
 
+static ssize_t show_hispeed_freq(struct kobject *kobj,
+                                 struct attribute *attr, char *buf)
+{
+        return sprintf(buf, "%d\n", hispeed_freq);
+}
+
+static ssize_t store_hispeed_freq(struct kobject *kobj,
+                                  struct attribute *attr, const char *buf,
+                                  size_t count)
+{
+        int ret;
+        u64 val;
+    
+        ret = strict_strtoull(buf, 0, &val);
+        if (ret < 0)
+                return ret;
+        hispeed_freq = val;
+        return count;
+}
+
+static struct global_attr hispeed_freq_attr = __ATTR(hispeed_freq, 0644,
+                                                     show_hispeed_freq, store_hispeed_freq);
+
+static ssize_t show_above_hispeed_delay(struct kobject *kobj,
+                                        struct attribute *attr, char *buf)
+{
+        return sprintf(buf, "%lu\n", above_hispeed_delay_val);
+}
+
+static ssize_t store_above_hispeed_delay(struct kobject *kobj,
+                                         struct attribute *attr,
+                                         const char *buf, size_t count)
+{
+        int ret;
+        unsigned long val;
+    
+        ret = strict_strtoul(buf, 0, &val);
+        if (ret < 0)
+                return ret;
+        above_hispeed_delay_val = val;
+        return count;
+}
+
+define_one_global_rw(above_hispeed_delay);
+
 static ssize_t show_min_sample_time(struct kobject *kobj,
                                     struct attribute *attr, char *buf)
 {
@@ -700,6 +772,8 @@ static struct global_attr dynamic_scaling_attr = __ATTR(dynamic_scaling, 0644,
                                                         show_dynamic_scaling, store_dynamic_scaling);
 
 static struct attribute *interactive_attributes[] = {
+	&hispeed_freq_attr.attr,
+	&above_hispeed_delay.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
 	&input_boost_freq_attr.attr,
@@ -714,6 +788,13 @@ static struct attribute_group interactive_attr_group = {
 };
 
 /* gpu_state, online_cpus, tunable */
+
+void scale_above_hispeed_delay(unsigned int new_above_hispeed_delay)
+{
+        if (dynamic_scaling &&
+                above_hispeed_delay_val != new_above_hispeed_delay)
+                above_hispeed_delay_val = new_above_hispeed_delay;
+}
 
 unsigned int scale_min_sample_time(void)
 {
@@ -767,6 +848,8 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
                       &pcpu->target_set_time, gpu_idle ? 0 : 1);
                 pcpu->floor_freq = pcpu->target_freq;
                 pcpu->floor_validate_time =
+				pcpu->target_set_time;
+		pcpu->hispeed_validate_time =
 				pcpu->target_set_time;
                 pcpu->governor_enabled = 1;
                 pcpu->idle_exit_time = pcpu->target_set_time;
@@ -861,7 +944,9 @@ static int __init cpufreq_interactive_init(void)
     
 	up_threshold = DEFAULT_UP_THRESHOLD;
 	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
+	above_hispeed_delay_val = DEFAULT_ABOVE_HISPEED_DELAY;
 	timer_rate = DEFAULT_TIMER_RATE;
+	hispeed_freq = DEFAULT_HISPEED_FREQ;
 	input_boost_freq = DEFAULT_INPUT_BOOST_FREQ;
 	input_boost_freq_duration = DEFAULT_INPUT_BOOST_FREQ_DURATION;
     
