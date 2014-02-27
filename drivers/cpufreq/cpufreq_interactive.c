@@ -99,7 +99,7 @@ static struct interactive_vaules {
 	int ntarget_loads;
 } 
 boost_values = {
-	.default_target_loads = {30, 702000, 40, 1026000, 50, 1458, 65},
+	.default_target_loads = {30, 702000, 40, 1026000, 50, 1458000, 65},
 	.target_loads = boost_values.default_target_loads,
 	.ntarget_loads = ARRAY_SIZE(boost_values.default_target_loads)
 }, busy_values = {
@@ -109,7 +109,7 @@ boost_values = {
 	.timer_rate = (20 * USEC_PER_MSEC),
 	.above_hispeed_delay_val = (30 * USEC_PER_MSEC),
 	.timer_slack_val = (40 * USEC_PER_MSEC),
-	.default_target_loads = {40, 702000, 50, 1026000, 60, 1458, 70},
+	.default_target_loads = {40, 702000, 50, 1026000, 60, 1458000, 70},
 	.target_loads = busy_values.default_target_loads,
 	.ntarget_loads = ARRAY_SIZE(busy_values.default_target_loads)
 }, idle_values = {
@@ -119,7 +119,7 @@ boost_values = {
 	.timer_rate = (30 * USEC_PER_MSEC),
 	.above_hispeed_delay_val = (150 * USEC_PER_MSEC),
 	.timer_slack_val = -1,
-	.default_target_loads = {60, 702000, 70, 1026000, 80, 1458, 90},
+	.default_target_loads = {60, 702000, 70, 1026000, 80, 1458000, 90},
 	.target_loads = idle_values.default_target_loads,
 	.ntarget_loads = ARRAY_SIZE(idle_values.default_target_loads)
 };
