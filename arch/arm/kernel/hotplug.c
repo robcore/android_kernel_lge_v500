@@ -15,47 +15,25 @@
  * rewritten by Patrick Dittrich <patrick90vhm@gmail.com>
  */
 
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/cpu.h>
 #include <linux/workqueue.h>
 #include <linux/sched.h>
+#include <linux/platform_device.h>
 #include <linux/timer.h>
-#include <linux/powersuspend.h>
 #include <linux/cpufreq.h>
 #include <linux/delay.h>
 #include <linux/hotplug.h>
- 
-#include <mach/cpufreq.h>
+#include <linux/input.h>
+#include <linux/jiffies.h>
 
-#define DEFAULT_FIRST_LEVEL 60
-#define DEFAULT_THIRD_LEVEL 30
-#define DEFAULT_SUSPEND_FREQ 702000
-#define DEFAULT_CORES_ON_TOUCH 2
-#define DEFAULT_COUNTER 50
-#define BOOST_TIME 3000
+#include <linux/powersuspend.h>
 
-//#define DEBUG
+#define HOTPLUG "hotplug"
 
-#define GPU_STATE 2
-#define ACTIVE_CORES 4
-#define TUNABLES 2
-
-/* DEFAULT_THIRD_LEVEL, DEFAULT_FIRST_LEVEL */
-static unsigned int hotplug_val[GPU_STATE][ACTIVE_CORES][TUNABLES] =
-{{	
-	/* gpu idle */
-	{0, 80},
-	{40, 85},
-	{50, 90},
-	{60, 100} 
-	},{
-	/* gpu busy */
-	{0, 60},
-	{30, 60},
-	{30, 65},
-	{40, 100} 
-}};
+#define DEBUG
 
 struct cpu_load_data {
 	u64 prev_cpu_idle;
@@ -64,16 +42,44 @@ struct cpu_load_data {
 
 static DEFINE_PER_CPU(struct cpu_load_data, cpuload);
 
-static unsigned int cores_on_touch = DEFAULT_CORES_ON_TOUCH;
-static u64 now, coreboost_endtime;
-static short first_counter = 0;
-static short third_counter = 0;
+static u64 now;
 
 static struct workqueue_struct *wq;
-static struct workqueue_struct *pm_wq;
 static struct delayed_work decide_hotplug;
-static struct work_struct resume;
 static struct work_struct suspend;
+static struct work_struct resume;
+
+static unsigned int up_counter = 0;
+static unsigned int down_counter = 0;
+
+#define CPU_CORES 4
+
+static struct hotplug_values {
+	unsigned int up_threshold[CPU_CORES];
+	unsigned int down_threshold[CPU_CORES];
+	unsigned int max_up_counter[CPU_CORES];
+	unsigned int max_down_counter[CPU_CORES];
+	unsigned int sample_time_ms;
+} 
+boost_values = {
+	.up_threshold = {50, 60, 65, 100},
+	.down_threshold = {0, 20, 30, 40},
+	.max_up_counter = {4, 6, 6, 0},
+	.max_down_counter = {0, 150, 50, 40},
+	.sample_time_ms = 20
+}, busy_values = {
+	.up_threshold = {60, 60, 65, 100},
+	.down_threshold = {0, 30, 30, 40},
+	.max_up_counter = {4, 5, 6, 0},
+	.max_down_counter = {0, 100, 26, 18},
+	.sample_time_ms = 30
+}, idle_values = {
+	.up_threshold = {80, 85, 90, 100},
+	.down_threshold = {0, 40, 50, 60},
+	.max_up_counter = {6, 10, 10, 0},
+	.max_down_counter = {0, 30, 10, 6},
+	.sample_time_ms = 50
+};
 
 unsigned int get_cur_max(unsigned int cpu);
 
@@ -119,12 +125,9 @@ static inline int get_cpu_load(unsigned int cpu)
 	return (cur_load * cur_freq) / max_freq;
 }
 
-static void __ref online_core(unsigned short cpus_num)
+static void __ref online_core(void)
 {
 	unsigned int cpu;
-	
-	if (cpus_num > 3)
-		return;
 		
 	for_each_possible_cpu(cpu) 
 	{
@@ -135,20 +138,15 @@ static void __ref online_core(unsigned short cpus_num)
 		}
 	}
 	
-	coreboost_endtime = now + BOOST_TIME;
-	first_counter = 0;
-	third_counter = -DEFAULT_COUNTER;
+	up_counter = 0;
+	down_counter = 0;
 	
 	return;
 }
 
-static void __ref offline_core(unsigned short cpus_num)
+static void __ref offline_core(void)
 {   
 	unsigned int cpu;
-
-	if (cpus_num == 1 || (cpus_num == cores_on_touch
-				&& coreboost_endtime > now))
-		return;
 	
 	for (cpu = 3; cpu; cpu--)
 	{
@@ -159,27 +157,17 @@ static void __ref offline_core(unsigned short cpus_num)
 		}
 	}
 	
-	coreboost_endtime = now + BOOST_TIME;
-	first_counter = 0;
-	third_counter = 0;
+	up_counter = 0;
+	down_counter = 0;
 	
 	return;
-}
-
-unsigned int scale_first_level(unsigned int online_cpus)
-{
-	return hotplug_val[(gpu_idle)?0:1][online_cpus-1][1];
-}
-
-unsigned int scale_third_level(unsigned int online_cpus)
-{
-	return hotplug_val[(gpu_idle)?0:1][online_cpus-1][0];
 }
 
 static void __ref decide_hotplug_func(struct work_struct *work)
 {
 	unsigned int cpu, load, av_load = 0;
-	unsigned short online_cpus, up_val, down_val;
+	unsigned short online_cpus;
+	struct hotplug_values *values;
 
 #ifdef DEBUG
 	short load_array[4] = {};
@@ -188,7 +176,14 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 #endif
 
 	now = ktime_to_ms(ktime_get());
-	online_cpus = num_online_cpus();
+	online_cpus = num_online_cpus() - 1;
+
+	if (gpu_idle)
+		values = &idle_values;
+	else if (boostpulse_endtime > now)
+		values = &boost_values;
+	else
+		values = &busy_values;
 
 	for_each_online_cpu(cpu) 
 	{
@@ -200,82 +195,60 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 #endif		
 	}
 
-	av_load = av_load / online_cpus;
-	
-	if (gpu_idle)
+	av_load /= (online_cpus + 1);
+
+	if (av_load >= values->up_threshold[online_cpus])
 	{
-		up_val = 3;
-		down_val = 6;
+		if (up_counter < values->max_up_counter[online_cpus])
+			up_counter++;
+		
+		if (down_counter > 0)
+			down_counter--;
+			
+		if (up_counter >= values->max_up_counter[online_cpus]
+				&& online_cpus + 1 < CPU_CORES)
+			online_core();
 	}
-	else if (boostpulse_endtime > now 
-		&& online_cpus < cores_on_touch)
+	else if (av_load <= values->down_threshold[online_cpus])
 	{
-		up_val = 15;
-		down_val = 7;		
+		if (down_counter < values->max_down_counter[online_cpus])
+			down_counter++;
+		
+		if (up_counter > 0)
+			up_counter--;
+			
+		if (down_counter >= values->max_down_counter[online_cpus]
+				&& online_cpus > 0)
+			offline_core();	
 	}
 	else
 	{
-		up_val = 10;
-		down_val = 5;		
-	}
-
-	if (av_load >= scale_first_level(online_cpus))
-	{
-		coreboost_endtime = now + BOOST_TIME;
-
-		if (first_counter < DEFAULT_COUNTER)
-			first_counter += up_val;
+		if (up_counter > 0)
+			up_counter--;
 		
-		if (third_counter > 0)
-			third_counter -= up_val;
-			
-		if (first_counter >= DEFAULT_COUNTER)
-			online_core(online_cpus);	
-	}
-	else if (av_load <= scale_third_level(online_cpus))
-	{
-		if (third_counter < DEFAULT_COUNTER)
-			third_counter += down_val;
-		
-		if (first_counter > 0)
-			first_counter -= down_val;
-			
-		if (third_counter >= DEFAULT_COUNTER)
-			offline_core(online_cpus);	
-	}
-	else
-	{
-		if (now + (BOOST_TIME / 2) > coreboost_endtime)
-			coreboost_endtime = now + BOOST_TIME / 2; 
-
-		if (first_counter > 0)
-			first_counter -= down_val;
-		
-		if (third_counter > 0)
-			third_counter -= down_val; 
+		if (down_counter > 0)
+			down_counter--; 
 	}
 
 #ifdef DEBUG
 	cpu = 0;
 	pr_info("------HOTPLUG DEBUG INFO------\n");
-	pr_info("Cores on:\t%d", online_cpus);
+	pr_info("Cores on:\t%d", online_cpus + 1);
 	pr_info("Core0:\t\t%d", load_array[0]);
 	pr_info("Core1:\t\t%d", load_array[1]);
 	pr_info("Core2:\t\t%d", load_array[2]);
 	pr_info("Core3:\t\t%d", load_array[3]);
 	pr_info("Av Load:\t\t%d", av_load);
 	pr_info("-------------------------------");
-	pr_info("Up count:\t%d\n",first_counter);
-	pr_info("Dw count:\t%d\n",third_counter);
+	pr_info("Up count:\t%u -> %u\n",up_counter,
+			values->max_up_counter[online_cpus]);
+	pr_info("Dw count:\t%u -> %u\n",down_counter,
+			values->max_down_counter[online_cpus]);
 
-	if (gpu_idle)
-		pr_info("Gpu Idle:\ttrue");
-	else
-		pr_info("Gpu Idle:\tfalse");
-	if (boostpulse_endtime > now)
-		pr_info("Touch:\t\ttrue");
-	else
-		pr_info("Touch:\t\tfalse");
+	pr_info("Gpu Idle:\t%s",(gpu_idle ? "true" : "false"));
+
+	pr_info("Touch:\t\t%s",(boostpulse_endtime > now ?
+						 "true" : "false"));
 	
 	for_each_possible_cpu(cpu_debug)
 	{
@@ -288,100 +261,290 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 		else
 			pr_info("cpu%d:\t\toff",cpu_debug);
 	}
-	pr_info("First level:\t%d", scale_first_level(online_cpus));
-	pr_info("Third level:\t%d", scale_third_level(online_cpus));
 	pr_info("-----------------------------------------");
 #endif
 
-	queue_delayed_work(wq, &decide_hotplug, msecs_to_jiffies(30));
+	queue_delayed_work(wq, &decide_hotplug, 
+			msecs_to_jiffies(values->sample_time_ms));
 }
 
-static void suspend_func(struct work_struct *work)
+static void hotplug_suspend(struct work_struct *work)
 {
 	int cpu;
 
-	/* cancel the hotplug work when the screen is off and flush the WQ */
-	flush_workqueue(wq);
-	cancel_delayed_work_sync(&decide_hotplug);
-
-	pr_info("Early Suspend stopping Hotplug work...\n");
+	pr_info("power Suspend stopping Hotplug work...\n");
 	
-	for_each_possible_cpu(cpu) 
-	{
+	for_each_possible_cpu(cpu){
 		if (cpu)
-		{
 			cpu_down(cpu);
-		}
-		
 	}
 
-	first_counter = 0;
-	third_counter = 0;
+	up_counter = 0;
+	down_counter = 0;
 }
 
-static void __ref resume_func(struct work_struct *work)
+static void __ref hotplug_resume(struct work_struct *work)
 {
-	int cpu, onlined = 0;
+	int cpu;
 	u64 now = ktime_to_ms(ktime_get());
 
 	idle_counter = 0;
 	gpu_idle = false;
 
-	coreboost_endtime = now + BOOST_TIME;
 	boostpulse_endtime = now + boostpulse_duration_val;
 
-	for_each_possible_cpu(cpu) 
-	{
-		if (cpu) 
-		{
+	for_each_possible_cpu(cpu){
+		if (cpu){
 			cpu_up(cpu);
-			if (++onlined == 2)
-				break;
+			break;
 		}
 	}
-	
 	pr_info("Late Resume starting Hotplug work...\n");
-	queue_delayed_work(wq, &decide_hotplug, HZ);	
 }
 
 static void hotplug_power_suspend(struct power_suspend *handler)
-{	 
-	queue_work_on(0, pm_wq, &suspend);
+{   
+	schedule_work(&suspend);
 }
 
 static void hotplug_power_resume(struct power_suspend *handler)
-{  
-	queue_work_on(0, pm_wq, &resume);
+{   
+	schedule_work(&resume);
 }
 
-static struct power_suspend hotplug_suspend =
+static struct power_suspend power_suspend =
 {
 	.suspend = hotplug_power_suspend,
 	.resume = hotplug_power_resume,
 };
 
-int __init hotplug_init(void)
+/*
+ * Sysfs get/set entries start
+ */
+
+unsigned int *find_value(unsigned int value, unsigned int type)
 {
-	pr_info("Hotplug driver started.\n");
+	struct hotplug_values *values;
+	unsigned int *ret;
 
-	wq = alloc_ordered_workqueue("hotplug_workqueue", 0);
+	switch (type){
+		case 0: values = &boost_values; break;
+		case 1: values = &busy_values; break;
+		case 2: values = &idle_values; break;
+		default: return NULL;
+	}
+
+	switch (value){
+		case 0: ret = values->up_threshold; break;
+		case 1: ret = values->down_threshold; break;
+		case 2: ret = values->max_up_counter; break;
+		case 3: ret = values->max_down_counter; break;
+		case 4: ret = &(values->sample_time_ms); break;
+		default: return NULL;
+	}
+	return ret;
+}
+
+ssize_t show_array(unsigned int value, unsigned int type,
+		char *buf)
+{
+	unsigned int *array;
+	unsigned int i;
+	ssize_t ret = 0;
+
+	array = find_value(value, type);
+
+	for (i = 0; i < CPU_CORES; i++)
+		ret += sprintf(buf + ret, "%u%s", 
+				array[i], 
+				i + 1 < CPU_CORES ? " " : "");
+
+	ret += sprintf(buf + ret, "\n");
+	return ret;
+}
+
+ssize_t show_value(unsigned int value, unsigned int type,
+						char *buf)
+{
+	return sprintf(buf, "%u\n", *find_value(value, type));
+}
+
+static bool process_array(const char *buf, unsigned int *values)
+{
+	unsigned int new_values[CPU_CORES];
+	unsigned int space_count, num_len;
+	long temp;
+	const char *cp;
+	bool inval = true;
+	char valid[] = "0123456789 ";
+	char *space = " ";
+	char *val = valid;
+	char number[3] = "";
+
+	cp = buf;
+	space_count = 0;
+	num_len = 0;
+
+	do {
+		inval = true;
+		val = valid;
+
+		if (*cp != '\0'){
+			while (*val != '\0'){
+				if (*cp == *(val++)){
+					inval = false;
+					break;
+				}
+			}
+			if (inval)
+				goto err_inval;
+		}
+		
+		if (*cp == *space || *cp == '\0'){
+			if (space_count >= CPU_CORES)
+				goto err_inval;
+			
+			if (kstrtol(number, 10, &temp) < 0)
+				goto err_inval;
+
+			new_values[space_count] = 
+				(unsigned int) temp;
+			
+			space_count++;
+			num_len = 0;
+			strcpy(number, "");
+		} else if (++num_len <= 3)
+			strncat(number, cp, 1);
+		else
+			goto err_inval;
 	
-	if (!wq)
-		return -ENOMEM;
+		cp++;
 
-	pm_wq = alloc_workqueue("pm_workqueue", 0, 1);
-	
-	if (!pm_wq)
-		return -ENOMEM;
+	} while (*(cp - 1) != '\0');
 
+	if (space_count < CPU_CORES)
+		goto err_inval;
+
+	memcpy(values, new_values, sizeof(new_values));
+
+	pr_info("Values changed.\n");
+	return true;
+err_inval:
+	pr_info("Values invalid.\n");
+	return false;
+}
+
+bool store_array(unsigned int value, unsigned int type,
+					const char *buf)
+{
+	pr_info("Store hotplug values:\n");
+	pr_info("value: %u, type: %u, string: '%s'\n",
+		value, type, buf);
+
+	return process_array(buf, find_value(value, type));
+}
+
+bool store_value(unsigned int value, unsigned int type,
+					const char *buf)
+{
+	unsigned long val;
+	unsigned int *data; 
+	data = find_value(value, type);
+
+	pr_info("Store hotplug value:\n");
+	pr_info("value: %u, type: %u, string: '%s'\n",
+		value, type, buf);
+
+	if (kstrtoul(buf, 0, &val) < 0){
+		pr_info("Value invalid.\n");
+		return false;
+	}
+
+	if (value == 4 && val < 10)
+		val = 10;
+
+	*data = (unsigned int) val;
+	pr_info("Value changed.\n");
+
+	return true;
+}
+
+/*
+ * Sysfs get/set entries end
+ */
+
+static int __devinit hotplug_probe(struct platform_device *pdev)
+{
+	int ret = 0;
+
+	wq = alloc_workqueue("hotplug_workqueue", WQ_HIGHPRI 
+					| WQ_FREEZABLE, 0);
+    
+	if (!wq){
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	register_power_suspend(&power_suspend);
+
+	INIT_WORK(&suspend, hotplug_suspend);
+	INIT_WORK(&resume, hotplug_resume);
 	INIT_DELAYED_WORK(&decide_hotplug, decide_hotplug_func);
-	INIT_WORK(&resume, resume_func);
-	INIT_WORK(&suspend, suspend_func);
-	queue_delayed_work(wq, &decide_hotplug, HZ*25);
-	
-	register_power_suspend(&hotplug_suspend);
-	
+
+	queue_delayed_work_on(0, wq, &decide_hotplug, HZ * 30);
+    
+err:
+	return ret;	
+}
+
+static struct platform_device hotplug_device = {
+	.name = HOTPLUG,
+	.id = -1,
+};
+
+static int hotplug_remove(struct platform_device *pdev)
+{
+	destroy_workqueue(wq);
+
 	return 0;
 }
+
+static struct platform_driver hotplug_driver = {
+	.probe = hotplug_probe,
+	.remove = hotplug_remove,
+	.driver = {
+		.name = HOTPLUG,
+		.owner = THIS_MODULE,
+	},
+};
+
+static int __init hotplug_init(void)
+{
+	int ret;
+
+	ret = platform_driver_register(&hotplug_driver);
+
+	if (ret){
+		return ret;
+	}
+
+	ret = platform_device_register(&hotplug_device);
+
+	if (ret){
+		return ret;
+	}
+
+	pr_info("%s: init\n", HOTPLUG);
+
+	return ret;
+}
+
+static void __exit hotplug_exit(void)
+{
+	platform_device_unregister(&hotplug_device);
+	platform_driver_unregister(&hotplug_driver);
+}
+
 late_initcall(hotplug_init);
+module_exit(hotplug_exit);
 
