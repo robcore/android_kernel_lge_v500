@@ -33,7 +33,7 @@
 
 #define HOTPLUG "hotplug"
 
-#define DEBUG
+//#define DEBUG
 
 struct cpu_load_data {
 	u64 prev_cpu_idle;
